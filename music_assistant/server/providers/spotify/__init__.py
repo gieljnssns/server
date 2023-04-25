@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import locale
 import os
 import platform
 import time
@@ -23,6 +24,7 @@ from music_assistant.common.models.media_items import (
     Album,
     AlbumType,
     Artist,
+    BrowseFolder,
     ContentType,
     ImageType,
     MediaItemImage,
@@ -44,6 +46,8 @@ if TYPE_CHECKING:
     from music_assistant.server import MusicAssistant
     from music_assistant.server.models import ProviderInstanceType
 
+CONF_COUNTRY = "country"
+CONF_LOCALE = "locale"
 
 CACHE_DIR = gettempdir()
 SUPPORTED_FEATURES = (
@@ -94,6 +98,8 @@ async def get_config_entries(
         ConfigEntry(
             key=CONF_PASSWORD, type=ConfigEntryType.SECURE_STRING, label="Password", required=True
         ),
+        ConfigEntry(key=CONF_COUNTRY, type=ConfigEntryType.STRING, label="Country", required=False),
+        ConfigEntry(key=CONF_LOCALE, type=ConfigEntryType.STRING, label="Locale", required=False),
     )
 
 
@@ -114,6 +120,8 @@ class SpotifyProvider(MusicProvider):
         self._cache_dir = os.path.join(CACHE_DIR, self.instance_id)
         # try login which will raise if it fails
         await self.login()
+        loc = locale.getlocale()
+        print(loc)
 
     @property
     def supported_features(self) -> tuple[ProviderFeature, ...]:
@@ -184,6 +192,161 @@ class SpotifyProvider(MusicProvider):
                     if (item and item["id"])
                 ]
         return result
+
+    async def browse(self, path: str) -> BrowseFolder:
+        """Browse this provider's items.
+
+        :param path: The path to browse, (e.g. provid://artists).
+        """
+        _, subpath = path.split("://")
+        subsubpath = "" if "/" not in subpath else subpath.split("/")[-1]
+
+        # this reference implementation can be overridden with a provider specific approach
+        if not subpath:
+            # return main listing
+            root_items: list[BrowseFolder] = []
+            if ProviderFeature.LIBRARY_ARTISTS in self.supported_features:
+                root_items.append(
+                    BrowseFolder(
+                        item_id="artists",
+                        provider=self.domain,
+                        path=path + "artists",
+                        name="",
+                        label="artists",
+                    )
+                )
+            if ProviderFeature.LIBRARY_ALBUMS in self.supported_features:
+                root_items.append(
+                    BrowseFolder(
+                        item_id="albums",
+                        provider=self.domain,
+                        path=path + "albums",
+                        name="",
+                        label="albums",
+                    )
+                )
+            if ProviderFeature.LIBRARY_TRACKS in self.supported_features:
+                root_items.append(
+                    BrowseFolder(
+                        item_id="tracks",
+                        provider=self.domain,
+                        path=path + "tracks",
+                        name="",
+                        label="tracks",
+                    )
+                )
+            if ProviderFeature.LIBRARY_PLAYLISTS in self.supported_features:
+                root_items.append(
+                    BrowseFolder(
+                        item_id="playlists",
+                        provider=self.domain,
+                        path=path + "playlists",
+                        name="",
+                        label="playlists",
+                    )
+                )
+            if ProviderFeature.LIBRARY_RADIOS in self.supported_features:
+                root_items.append(
+                    BrowseFolder(
+                        item_id="radios",
+                        provider=self.domain,
+                        path=path + "radios",
+                        name="",
+                        label="radios",
+                    )
+                )
+            root_items.append(
+                BrowseFolder(
+                    item_id="genres",
+                    provider=self.domain,
+                    path=path + "genres",
+                    name="",
+                    label="Genres",
+                )
+            )
+            return BrowseFolder(
+                item_id="root",
+                provider=self.domain,
+                path=path,
+                name=self.name,
+                items=root_items,
+            )
+        # sublevel
+        if subpath == "artists":
+            return BrowseFolder(
+                item_id="artists",
+                provider=self.domain,
+                path=path,
+                name="",
+                label="artists",
+                items=[x async for x in self.get_library_artists()],
+            )
+        if subpath == "albums":
+            return BrowseFolder(
+                item_id="albums",
+                provider=self.domain,
+                path=path,
+                name="",
+                label="albums",
+                items=[x async for x in self.get_library_albums()],
+            )
+        if subpath == "tracks":
+            return BrowseFolder(
+                item_id="tracks",
+                provider=self.domain,
+                path=path,
+                name="",
+                label="tracks",
+                items=[x async for x in self.get_library_tracks()],
+            )
+        if subpath == "radios":
+            return BrowseFolder(
+                item_id="radios",
+                provider=self.domain,
+                path=path,
+                name="",
+                label="radios",
+                items=[x async for x in self.get_library_radios()],
+            )
+        if subpath == "playlists":
+            return BrowseFolder(
+                item_id="playlists",
+                provider=self.domain,
+                path=path,
+                name="",
+                label="playlists",
+                items=[x async for x in self.get_library_playlists()],
+            )
+        if subpath == "genres":
+            sub_items: list[BrowseFolder] = []
+            while True:
+                for item in await self.get_genres():
+                    folder = BrowseFolder(
+                        item_id=item,
+                        provider=self.domain,
+                        path=path + "/" + item,
+                        name="",
+                        label=item,
+                    )
+                    sub_items.append(folder)
+
+                return BrowseFolder(
+                    item_id="tag",
+                    provider=self.domain,
+                    path=path,
+                    name=self.name,
+                    items=sub_items,
+                )
+        if subsubpath in await self.get_genres():
+            return BrowseFolder(
+                item_id="playlists",
+                provider=self.domain,
+                path=path,
+                name="",
+                label="playlists",
+                items=[x for x in await self.get_playlists_by_genre(prov_genre_id=subsubpath)],
+            )
+        raise KeyError("Invalid subpath")
 
     async def get_library_artists(self) -> AsyncGenerator[Artist, None]:
         """Retrieve library artists from spotify."""
@@ -343,6 +506,22 @@ class SpotifyProvider(MusicProvider):
         endpoint = "recommendations"
         items = await self._get_data(endpoint, seed_tracks=prov_track_id, limit=limit)
         return [await self._parse_track(item) for item in items["tracks"] if (item and item["id"])]
+
+    async def get_playlists_by_genre(self, prov_genre_id, limit=25) -> list[Track]:
+        """Retrieve a dynamic list of playlists based on the provided item."""
+        print(prov_genre_id)
+        endpoint = f"browse/categories/{prov_genre_id}/playlists"
+        items = await self._get_data(endpoint, country=CONF_COUNTRY, limit=limit)
+        print(items)
+        return [
+            await self._parse_playlist(item) for item in items["playlists"] if (item and item["id"])
+        ]
+
+    async def get_genres(self) -> list:
+        """Retrieve a list of genres."""
+        endpoint = "recommendations/available-genre-seeds"
+        genres = await self._get_data(endpoint)
+        return genres["genres"]
 
     async def get_stream_details(self, item_id: str) -> StreamDetails:
         """Return the content details for the given track when it will be streamed."""
